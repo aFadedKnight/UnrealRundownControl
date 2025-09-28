@@ -1,0 +1,47 @@
+{
+	"Name": "Unreal Rundown Control",
+	"Version": "0.1.0.0",
+	"Author": "aFadedKnight",
+	"Actions": [
+		{
+			"Name": "Take Page",
+			"UUID": "com.afadedknight.unreal-rundown-control.take",
+			"Icon": "imgs/actions/Take/Play",
+			"Tooltip": "Select a page to take in or out in Unreal Engine Rundown",
+			"PropertyInspectorPath": "ui/propertyinspector.html",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/Take/Play",
+					"TitleAlignment": "top"
+				}
+			]
+		}
+	],
+	"Category": "Unreal Rundown Control",
+	"CategoryIcon": "imgs/plugin/UnrealRundownControlIcon",
+	"CodePath": "bin/plugin.js",
+	"Description": "Control Rundown in Unreal Engine Motion Design with Stream Deck",
+	"Icon": "imgs/plugin/marketplace",
+	"SDKVersion": 2,
+	"Software": {
+		"MinimumVersion": "6.5"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "12"
+		},
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "20",
+		"Debug": "enabled"
+	},
+	"UUID": "com.afadedknight.unreal-rundown-control"
+}
