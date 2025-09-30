@@ -2,14 +2,18 @@
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>My Test Action Settings</title>
+    <title>Unreal Rundown Control Settings</title>
     <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
 </head>
 <body>
     <sdpi-item label="Rundown">
-        <sdpi-textfield setting="rundownPath" required placeholder="Rundown Object Path"></sdpi-textfield>
+        <sdpi-select setting="rundownPath2" 
+                     placeholder="Choose a Rundown"
+                     datasource="getRundowns"
+                     loading="Fetching available rundowns..."> 
+        </sdpi-select>
     </sdpi-item>
-    <sdpi-item label="Action">
+    <sdpi-item label="Page Action">
         <sdpi-select setting="actionType" placeholder="Choose an Action for the Page">
             <optgroup label="Actions">
                 <option value="Play">Take In</option>
@@ -17,14 +21,15 @@
             </optgroup>
         </sdpi-select>
     </sdpi-item>
+    
     <sdpi-item label="Page">
-        <sdpi-textfield setting="page" required placeholder="Page Number without leading 0's (Ex. 1)"></sdpi-textfield>
+        <sdpi-textfield setting="page" required placeholder="Page Number (Ex. 1)"></sdpi-textfield>
     </sdpi-item>
     <sdpi-item label="Host">
         <sdpi-textfield setting="serverHost" placeholder="127.0.0.1" value="127.0.0.1"></sdpi-textfield>
     </sdpi-item>
     <sdpi-item label="Port">
-        <sdpi-textfield setting="websocketPort" required placeholder="Webscocket Port"></sdpi-textfield>
+        <sdpi-textfield setting="websocketPort" required placeholder="Websocket Port"></sdpi-textfield>
     </sdpi-item>
 </body>
 </html>

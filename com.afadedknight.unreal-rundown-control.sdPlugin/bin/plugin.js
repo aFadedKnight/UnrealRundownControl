@@ -8270,15 +8270,21 @@ typeof SuppressedError === "function" ? SuppressedError : function (error, suppr
 
 // --- GLOBAL WEBSOCKET VARIABLES ---
 let rundownWebsocket = null;
+let RUNDOWN_SERVER_UUID = null; // Store UUID globally after discovery
+let availableRundowns = []; // 👈 CHANGED: Store as a string array
+// CRITICAL: Promise to prevent multiple simultaneous connection attempts
+let discoveryPromise = null;
 const logger = streamDeck.logger.createScope('RundownControl');
 // --- Configuration ---
 const CLIENT_UUID = crypto.randomUUID();
-// --- Message Type Definitions ---
-const MODULE_PATH = "AvalancheMedia.";
+const MODULE_PATH = "/Script/AvalancheMedia."; // Use fully qualified path
 const MESSAGE_TYPE_PING = MODULE_PATH + "AvaRundownPing";
 const MESSAGE_TYPE_LOAD_RUNDOWN = MODULE_PATH + "AvaRundownLoadRundown";
 const MESSAGE_TYPE_PAGE_ACTION = MODULE_PATH + "AvaRundownPageAction";
+const MESSAGE_TYPE_GET_RUNDOWNS = MODULE_PATH + "AvaRundownGetRundowns";
+// --- Message Builder (Modified for Qualified Message Types) ---
 function createRundownMessage(messageType, recipientUUID, payload) {
+    // Note: Recipient can be null/"" for initial PING broadcast
     const outer_envelope = {
         "sender": CLIENT_UUID,
         "recipients": recipientUUID ? [recipientUUID] : [],
@@ -8286,6 +8292,130 @@ function createRundownMessage(messageType, recipientUUID, payload) {
         "Message": payload
     };
     return JSON.stringify(outer_envelope);
+}
+// --- CONNECTION MANAGER ---
+/**
+ * Handles the actual connection and PING handshake logic.
+ * Should only be called internally by connectAndDiscover.
+ */
+async function _executeConnectionAndDiscovery(settings) {
+    const { serverHost, websocketPort } = settings;
+    const RUNDOWN_WEBSOCKET_URL = `ws://${serverHost}:${websocketPort}`;
+    // Close stale connection if necessary
+    if (rundownWebsocket) {
+        rundownWebsocket.close();
+    }
+    try {
+        logger.info(`Attempting to connect to ${RUNDOWN_WEBSOCKET_URL}`);
+        rundownWebsocket = new WebSocket(RUNDOWN_WEBSOCKET_URL);
+        await new Promise((resolve, reject) => {
+            rundownWebsocket.onopen = () => { resolve(); };
+            rundownWebsocket.onerror = (e) => {
+                logger.error(`Connection failed: ${e.message}`);
+                reject(new Error("Connection failed."));
+            };
+        });
+        logger.info("Connection established. Starting handshake (Ping/Pong)...");
+        // --- 1. PING/PONG Handshake ---
+        const pingRequestId = Math.floor(Math.random() * 1000000);
+        const pingMessage = createRundownMessage(MESSAGE_TYPE_PING, null, { RequestId: pingRequestId, bAuto: true });
+        const newRecipientUUID = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                reject(new Error("Handshake timeout: Did not receive AvaRundownPong."));
+            }, 5000);
+            // Temporary listener for PONG response
+            rundownWebsocket.onmessage = (event) => {
+                const dataString = event.data.toString('utf8');
+                const response = JSON.parse(dataString);
+                if (response.MessageType === "/Script/AvalancheMedia.AvaRundownPong") {
+                    clearTimeout(timer);
+                    // IMPORTANT: Clear the onmessage handler to prevent old listeners from firing later
+                    rundownWebsocket.onmessage = null;
+                    resolve(response.Sender);
+                }
+            };
+            rundownWebsocket.send(pingMessage);
+        });
+        RUNDOWN_SERVER_UUID = newRecipientUUID;
+        logger.info(`Server UUID set: ${RUNDOWN_SERVER_UUID}`);
+        // --- 2. Get Available Rundowns (FIXED LOGIC) ---
+        const rundownRequestId = Math.floor(Math.random() * 1000000);
+        // Send request to the newly discovered server UUID
+        const rundownMessage = createRundownMessage(MESSAGE_TYPE_GET_RUNDOWNS, RUNDOWN_SERVER_UUID, { RequestId: rundownRequestId });
+        const newAvailableRundowns = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                reject(new Error("Timeout: Did not receive AvaRundownRundowns response."));
+            }, 5000);
+            // Temporary listener for the rundown response
+            rundownWebsocket.onmessage = (event) => {
+                try {
+                    const dataString = event.data.toString('utf8');
+                    const response = JSON.parse(dataString);
+                    // CHECK FOR CORRECT MESSAGE TYPE AND REQUEST ID
+                    if (response.MessageType === "/Script/AvalancheMedia.AvaRundownRundowns") {
+                        clearTimeout(timer);
+                        // CLEAR the onmessage handler
+                        rundownWebsocket.onmessage = null;
+                        // EXTRACT THE RUNDOWN ARRAY
+                        const rundownsArray = response.Message.rundowns || [];
+                        logger.info(rundownsArray);
+                        resolve(rundownsArray);
+                    }
+                }
+                catch (e) {
+                    logger.error(`Error processing Rundown message: ${e}`);
+                }
+            };
+            rundownWebsocket.send(rundownMessage);
+        });
+        availableRundowns = newAvailableRundowns; // 👈 Assign the array
+        logger.info(`Available Rundowns: ${availableRundowns.join(', ')}`); // 👈 Log the result
+    }
+    catch (e) {
+        logger.error(`FATAL CONNECTION/DISCOVERY ERROR: ${e.message}`);
+        // Clean up connection attempt on failure
+        if (rundownWebsocket) {
+            rundownWebsocket.close();
+            rundownWebsocket = null;
+        }
+        RUNDOWN_SERVER_UUID = null;
+        availableRundowns = []; // 👈 Clear array on failure
+        throw e; // Propagate the error
+    }
+}
+/**
+ * Public function to manage connection attempts, ensuring only one runs at a time.
+ */
+async function connectAndDiscover(settings) {
+    if (!settings.serverHost || !settings.websocketPort) {
+        logger.warn("Server Host or Port is missing. Skipping connection attempt.");
+        return;
+    }
+    // Check 1: If connection is already open, do nothing.
+    if (rundownWebsocket && rundownWebsocket.readyState === WebSocket.OPEN && RUNDOWN_SERVER_UUID) {
+        logger.info("Connection already open and discovered.");
+        return;
+    }
+    // Check 2: If a connection attempt is currently running, wait for it.
+    if (discoveryPromise) {
+        logger.info("Connection attempt already in progress. Waiting...");
+        return discoveryPromise;
+    }
+    // Start the connection attempt and save the promise
+    discoveryPromise = _executeConnectionAndDiscovery(settings);
+    try {
+        await discoveryPromise;
+    }
+    catch (e) {
+        // If the promise fails, clear the global UUID and promise object
+        RUNDOWN_SERVER_UUID = null;
+        availableRundowns = []; // 👈 Clear array on failure
+        throw e;
+    }
+    finally {
+        // Clear the promise object whether it succeeded or failed
+        discoveryPromise = null;
+    }
 }
 let RundownAction = (() => {
     let _classDecorators = [action({ UUID: 'com.afadedknight.unreal-rundown-control.take' })];
@@ -8302,116 +8432,104 @@ let RundownAction = (() => {
             if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             __runInitializers(_classThis, _classExtraInitializers);
         }
+        // ... (updateKeyAppearance is unchanged)
+        updateKeyAppearance(action, settings) {
+            action.setImage(`imgs/actions/Take/${settings.actionType}.png`);
+            action.setTitle(settings.page ? `Page ${settings.page}` : `No Page`);
+        }
+        /** * Runs when the action appears on the Stream Deck.
+         * Used for initial setup and connection attempt.
+         */
         onWillAppear(ev) {
             const settings = ev.payload.settings;
-            ev.action.setImage(`imgs/actions/Take/${settings.actionType}.png`);
-            if (settings.page == undefined) {
-                ev.action.setTitle(`No Page`);
-            }
-            else {
-                ev.action.setTitle(`Page ${settings.page}`);
-            }
+            this.updateKeyAppearance(ev.action, settings);
+            // Use the globally managed connection function
+            return connectAndDiscover(settings);
         }
+        /** * Runs when settings are saved in the Property Inspector.
+         * Used to update appearance and attempt reconnection if host/port changed.
+         */
         onDidReceiveSettings(ev) {
             const settings = ev.payload.settings;
-            ev.action.setImage(`imgs/actions/Take/${settings.actionType}.png`);
-            if (settings.page == undefined) {
-                ev.action.setTitle(`No Page`);
+            this.updateKeyAppearance(ev.action, settings);
+            if (settings.serverHost === "") {
+                logger.warn("Host was left empty resetting to default 127.0.0.1");
+                settings.serverHost = "127.0.0.1";
+                ev.action.setSettings(settings);
+                logger.info(settings.serverHost);
             }
-            else {
-                ev.action.setTitle(`Page ${settings.page}`);
+            // Use the globally managed connection function
+            return connectAndDiscover(settings);
+        }
+        onSendToPlugin(ev) {
+            // Check if the payload is requesting a data source, i.e. the structure is { event: string }
+            if (ev.payload instanceof Object && "event" in ev.payload && ev.payload.event === "getRundowns") {
+                // Map the globally stored availableRundowns array to the Stream Deck Data Source format
+                const rundownsForUI = availableRundowns.map(rundownPath => {
+                    // Rundown paths are typically in the format: /Game/Folder/AssetName.AssetName
+                    // We'll use the last segment as the display label for simplicity.
+                    const pathSegments = rundownPath.split('/');
+                    const nameWithAsset = pathSegments.pop() || rundownPath;
+                    const nameOnly = nameWithAsset.split('.')[0];
+                    return {
+                        label: nameOnly,
+                        value: rundownPath
+                    };
+                });
+                // Send the list to the property inspector.
+                streamDeck.ui.current?.sendToPropertyInspector({
+                    event: "getRundowns",
+                    items: rundownsForUI,
+                });
             }
         }
+        /**
+         * Executes the control command when the key is pressed.
+         */
         async onKeyDown(ev) {
             const settings = ev.payload.settings;
             const actionType = settings.actionType;
-            const rundownPath = settings.rundownPath;
+            const rundownPath = settings.rundownPath2;
             const PAGE_ID = settings.page;
-            const RUNDOWN_SERVER_HOST = settings.serverHost;
-            const RUNDOWN_WEBSOCKET_PORT = settings.websocketPort;
-            const RUNDOWN_WEBSOCKET_URL = `ws://${RUNDOWN_SERVER_HOST}:${RUNDOWN_WEBSOCKET_PORT}`;
-            if (!rundownPath || rundownPath === "") {
-                logger.error("FATAL: Rundown Path is empty. Please enter a value in the Property Inspector.");
+            // Check 1: Connection & Discovery Status (Triggers a quick retry if needed)
+            if (!RUNDOWN_SERVER_UUID || rundownWebsocket?.readyState !== WebSocket.OPEN) {
+                logger.warn("Connection lost or not established. Attempting immediate foreground connect...");
+                await connectAndDiscover(settings);
+                if (!RUNDOWN_SERVER_UUID) {
+                    logger.error("FATAL: Failed to establish connection during key press.");
+                    ev.action.showAlert();
+                    return;
+                }
+            }
+            // Check 2: Mandatory Settings
+            if (!rundownPath || rundownPath === "" || PAGE_ID === undefined) {
+                logger.error("FATAL: Rundown Path or Page ID is missing.");
                 ev.action.showAlert();
                 return;
             }
-            logger.info("Key pressed. Starting full control sequence...");
+            // Use the globally available RUNDOWN_SERVER_UUID
+            const finalRecipientUUID = RUNDOWN_SERVER_UUID;
+            logger.info(`Executing Action: ${actionType} on Page ${PAGE_ID}`);
             try {
-                // 1. Establish connection
-                if (!rundownWebsocket || rundownWebsocket.readyState === WebSocket.CLOSED) {
-                    rundownWebsocket = new WebSocket(RUNDOWN_WEBSOCKET_URL);
-                    await new Promise((resolve, reject) => {
-                        rundownWebsocket.onopen = () => { resolve(); };
-                        rundownWebsocket.onerror = (e) => {
-                            logger.error("Connection failed on open. Check server status/port 8091.");
-                            ev.action.showAlert();
-                            reject(new Error("Connection failed."));
-                        };
-                        rundownWebsocket.onclose = () => logger.warn("Rundown WebSocket closed.");
-                    });
-                    logger.info("Connection established successfully.");
-                }
-                // --- PHASE 1: DISCOVERY (PING/PONG) ---
-                const pingRequestId = Math.floor(Math.random() * 1000000000);
-                const finalRecipientUUID = await new Promise((resolve, reject) => {
-                    const timer = setTimeout(() => {
-                        reject(new Error("Timeout: Did not receive AvaRundownPong response."));
-                    }, 5000);
-                    rundownWebsocket.onmessage = (event) => {
-                        const dataString = event.data.toString('utf8');
-                        const response = JSON.parse(dataString);
-                        if (response.MessageType === "/Script/AvalancheMedia.AvaRundownPong") {
-                            clearTimeout(timer);
-                            logger.info("PONG received. Proceeding to Load Rundown.");
-                            resolve(response.Sender);
-                        }
-                    };
-                    const pingMessage = createRundownMessage(MESSAGE_TYPE_PING, "", { RequestId: pingRequestId });
-                    rundownWebsocket.send(pingMessage);
-                });
-                // --- PHASE 2: LOAD RUNDOWN ASSET ---
+                // --- Step 1: LOAD RUNDOWN ASSET (Ensure context is correct) ---
+                // Note: According to FAvaRundownLoadRundown, an empty path returns current loaded rundown. 
+                // Sending the path ensures the correct rundown is loaded for playback.
                 const loadRundownId = Math.floor(Math.random() * 1000000000);
-                await new Promise((resolve, reject) => {
-                    const timer = setTimeout(() => {
-                        reject(new Error("Timeout (Phase 2/LOAD): Did not receive load confirmation."));
-                    }, 5000);
-                    rundownWebsocket.onmessage = (event) => {
-                        const dataString = event.data.toString('utf8');
-                        const response = JSON.parse(dataString);
-                        // Check for successful server message (FAvaRundownServerMsg)
-                        if (response.MessageType) {
-                            clearTimeout(timer);
-                            if (response.Message?.Verbosity === 'Error') {
-                                logger.error(`RUNDOWN LOAD ERROR: ${response.Message.Text}`);
-                                reject(new Error(`Load Rundown failed: ${response.Message.Text}`));
-                            }
-                            else {
-                                logger.info("Rundown asset loaded successfully.");
-                                resolve();
-                            }
-                        }
-                    };
-                    // USE THE USER-DEFINED PATH HERE
-                    const loadMessage = createRundownMessage(MESSAGE_TYPE_LOAD_RUNDOWN, finalRecipientUUID, { Rundown: rundownPath, RequestId: loadRundownId });
-                    rundownWebsocket.send(loadMessage);
-                    logger.info(`Sending Load Rundown command for asset: ${rundownPath}`);
-                });
-                // --- PHASE 3: SEND FINAL ACTION COMMAND (PLAY) ---
+                const loadMessage = createRundownMessage(MESSAGE_TYPE_LOAD_RUNDOWN, finalRecipientUUID, { Rundown: rundownPath, RequestId: loadRundownId });
+                rundownWebsocket.send(loadMessage);
+                // --- Step 2: SEND FINAL ACTION COMMAND (PLAY/STOP) ---
                 const action_payload = { "RequestId": 2, "PageId": PAGE_ID, "Action": actionType };
                 const finalCommandMessage = createRundownMessage(MESSAGE_TYPE_PAGE_ACTION, finalRecipientUUID, action_payload);
                 rundownWebsocket.send(finalCommandMessage);
-                logger.info(`Final Page Action sent successfully to UUID: ${finalRecipientUUID}.`);
                 ev.action.showOk();
-                // 4. Disconnect
-                rundownWebsocket.close();
             }
             catch (e) {
-                // Log the error and close if necessary
-                if (rundownWebsocket && rundownWebsocket.readyState !== WebSocket.CLOSED) {
-                    rundownWebsocket.close();
-                }
-                logger.error(`FATAL ERROR in execution: ${e.message}`);
+                logger.error(`FATAL ERROR during command execution: ${e.message}`);
+                ev.action.showAlert();
             }
+        }
+        onWillDisappear(ev) {
+            // Keeping connection open for other keys
         }
     });
     return _classThis;
